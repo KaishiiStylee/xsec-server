@@ -5,12 +5,16 @@ const cors = require('cors');
 
 const app = express();
 app.use(cors({ origin: '*' }));
-app.use(express.json({ limit: '10mb' }));
+// PENTING: limit 20MB untuk story base64
+app.use(express.json({ limit: '20mb' }));
+app.use(express.urlencoded({ limit: '20mb', extended: true }));
 
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: { origin: '*', methods: ['GET', 'POST'] },
-  maxHttpBufferSize: 1e7
+  maxHttpBufferSize: 2e7,
+  pingTimeout: 60000,
+  pingInterval: 25000
 });
 
 /* STORY */
@@ -23,22 +27,48 @@ setInterval(() => {
 }, 3600 * 1000);
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', connections: io.engine.clientsCount, stories: stories.length, time: new Date().toISOString() });
+  res.json({
+    status: 'ok',
+    connections: io.engine.clientsCount,
+    stories: stories.length,
+    time: new Date().toISOString()
+  });
 });
 
+/* UPLOAD STORY — dengan logging detail */
 app.post('/api/story', (req, res) => {
-  const { userId, userName, userAvatar, media, mediaType, caption, music } = req.body;
-  if (!userId || !media) return res.status(400).json({ error: 'Missing data' });
-  const story = {
-    id: 'story-' + Date.now() + '-' + Math.random().toString(36).substr(2, 6),
-    userId, userName: userName || 'User', userAvatar: userAvatar || '',
-    media, mediaType: mediaType || 'image',
-    caption: caption || '', music: music || null,
-    createdAt: Date.now(), viewers: []
-  };
-  stories.push(story);
-  io.emit('story:new', story);
-  res.json(story);
+  try {
+    const { userId, userName, userAvatar, media, mediaType, caption, music } = req.body;
+
+    if (!userId || !media) {
+      console.log('❌ Story ditolak: data tidak lengkap');
+      return res.status(400).json({ error: 'Missing userId or media' });
+    }
+
+    const sizeKB = Math.round(media.length / 1024);
+    console.log(`📥 Terima story dari ${userName || userId} (${sizeKB} KB, ${mediaType})`);
+
+    const story = {
+      id: 'story-' + Date.now() + '-' + Math.random().toString(36).substr(2, 6),
+      userId,
+      userName: userName || 'User',
+      userAvatar: userAvatar || '',
+      media,
+      mediaType: mediaType || 'image',
+      caption: caption || '',
+      music: music || null,
+      createdAt: Date.now(),
+      viewers: []
+    };
+
+    stories.push(story);
+    io.emit('story:new', story);
+    console.log(`✅ Story disimpan: ${story.id} (total: ${stories.length})`);
+    res.json(story);
+  } catch (e) {
+    console.error('❌ Error upload story:', e);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.get('/api/stories', (req, res) => res.json(stories));
@@ -48,6 +78,7 @@ app.delete('/api/story/:id', (req, res) => {
   if (idx === -1) return res.status(404).json({ error: 'Not found' });
   const removed = stories.splice(idx, 1)[0];
   io.emit('story:deleted', removed.id);
+  console.log('🗑️ Story dihapus:', removed.id);
   res.json({ ok: true });
 });
 
@@ -59,23 +90,15 @@ app.post('/api/story/:id/view', (req, res) => {
 });
 
 /* USER & SIGNALING */
-const onlineUsers = new Map(); // userId -> { socketId, name, avatar }
+const onlineUsers = new Map();
 
 io.on('connection', (socket) => {
-  console.log('User connected:', socket.id);
+  console.log('🔌 User connected:', socket.id);
 
   socket.on('user:online', (payload) => {
-    // Support payload lama (string) dan baru (object)
     let userId, name, avatar;
-    if (typeof payload === 'string') {
-      userId = payload;
-      name = payload;
-      avatar = '';
-    } else {
-      userId = payload.userId;
-      name = payload.name || userId;
-      avatar = payload.avatar || '';
-    }
+    if (typeof payload === 'string') { userId = payload; name = payload; avatar = ''; }
+    else { userId = payload.userId; name = payload.name || userId; avatar = payload.avatar || ''; }
     onlineUsers.set(userId, { socketId: socket.id, name, avatar });
     io.emit('users:online', Array.from(onlineUsers.keys()));
     socket.emit('stories:init', stories);
@@ -102,32 +125,24 @@ io.on('connection', (socket) => {
     if (target) io.to(target.socketId).emit('chat:read', { from: to, messageId });
   });
 
-  /* WEBRTC SIGNALING */
   socket.on('call:initiate', ({ from, fromName, fromAvatar, to, type }) => {
     const target = onlineUsers.get(to);
     if (!target) { socket.emit('call:unavailable', { to }); return; }
     io.to(target.socketId).emit('call:incoming', { from, fromName, fromAvatar, type, callId: socket.id });
-    console.log(`📞 Call dari ${from} ke ${to} (${type})`);
+    console.log(`📞 Call ${from} → ${to} (${type})`);
   });
 
-  socket.on('call:accept', ({ callId }) => {
-    io.to(callId).emit('call:accepted');
-  });
-
-  socket.on('call:reject', ({ callId }) => {
-    io.to(callId).emit('call:rejected');
-  });
+  socket.on('call:accept', ({ callId }) => io.to(callId).emit('call:accepted'));
+  socket.on('call:reject', ({ callId }) => io.to(callId).emit('call:rejected'));
 
   socket.on('webrtc:offer', ({ to, offer }) => {
     const target = onlineUsers.get(to);
     if (target) io.to(target.socketId).emit('webrtc:offer', { from: socket.id, offer });
   });
-
   socket.on('webrtc:answer', ({ to, answer }) => {
     const target = onlineUsers.get(to);
     if (target) io.to(target.socketId).emit('webrtc:answer', { from: socket.id, answer });
   });
-
   socket.on('webrtc:ice', ({ to, candidate }) => {
     const target = onlineUsers.get(to);
     if (target) io.to(target.socketId).emit('webrtc:ice', { from: socket.id, candidate });
@@ -140,11 +155,14 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', () => {
     for (const [userId, data] of onlineUsers) {
-      if (data.socketId === socket.id) onlineUsers.delete(userId);
+      if (data.socketId === socket.id) {
+        onlineUsers.delete(userId);
+        console.log('❌ User offline:', userId);
+      }
     }
     io.emit('users:online', Array.from(onlineUsers.keys()));
   });
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, '0.0.0.0', () => console.log('Server on port', PORT));
+server.listen(PORT, '0.0.0.0', () => console.log('🚀 Server on port', PORT));
