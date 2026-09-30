@@ -13,7 +13,7 @@ const io = new Server(server, {
   maxHttpBufferSize: 1e7
 });
 
-/* ===== STORY ===== */
+/* STORY */
 let stories = [];
 setInterval(() => {
   const now = Date.now();
@@ -23,22 +23,16 @@ setInterval(() => {
 }, 3600 * 1000);
 
 app.get('/', (req, res) => {
-  res.json({
-    status: 'ok',
-    message: 'XSEC Server',
-    connections: io.engine.clientsCount,
-    stories: stories.length,
-    time: new Date().toISOString()
-  });
+  res.json({ status: 'ok', connections: io.engine.clientsCount, stories: stories.length, time: new Date().toISOString() });
 });
 
 app.post('/api/story', (req, res) => {
-  const { userId, userName, media, mediaType, caption, music } = req.body;
+  const { userId, userName, userAvatar, media, mediaType, caption, music } = req.body;
   if (!userId || !media) return res.status(400).json({ error: 'Missing data' });
   const story = {
     id: 'story-' + Date.now() + '-' + Math.random().toString(36).substr(2, 6),
-    userId, userName: userName || 'User', media,
-    mediaType: mediaType || 'image',
+    userId, userName: userName || 'User', userAvatar: userAvatar || '',
+    media, mediaType: mediaType || 'image',
     caption: caption || '', music: music || null,
     createdAt: Date.now(), viewers: []
   };
@@ -64,19 +58,29 @@ app.post('/api/story/:id/view', (req, res) => {
   res.json({ ok: true });
 });
 
-/* ===== USER ONLINE ===== */
-const onlineUsers = new Map(); // userId -> { socketId, callState }
+/* USER & SIGNALING */
+const onlineUsers = new Map(); // userId -> { socketId, name, avatar }
 
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
 
-  socket.on('user:online', (userId) => {
-    onlineUsers.set(userId, { socketId: socket.id });
+  socket.on('user:online', (payload) => {
+    // Support payload lama (string) dan baru (object)
+    let userId, name, avatar;
+    if (typeof payload === 'string') {
+      userId = payload;
+      name = payload;
+      avatar = '';
+    } else {
+      userId = payload.userId;
+      name = payload.name || userId;
+      avatar = payload.avatar || '';
+    }
+    onlineUsers.set(userId, { socketId: socket.id, name, avatar });
     io.emit('users:online', Array.from(onlineUsers.keys()));
     socket.emit('stories:init', stories);
   });
 
-  /* ===== CHAT ===== */
   socket.on('chat:send', (msg) => {
     const target = onlineUsers.get(msg.to);
     if (target) io.to(target.socketId).emit('chat:receive', msg);
@@ -88,27 +92,30 @@ io.on('connection', (socket) => {
     if (target) io.to(target.socketId).emit('chat:typing', { from, isTyping });
   });
 
-  /* ===== WEBRTC SIGNALING ===== */
-  socket.on('call:initiate', ({ from, fromName, to, type }) => {
+  socket.on('chat:delivered', ({ to, messageId }) => {
     const target = onlineUsers.get(to);
-    if (!target) {
-      socket.emit('call:unavailable', { to });
-      return;
-    }
-    io.to(target.socketId).emit('call:incoming', {
-      from, fromName, type, callId: socket.id
-    });
+    if (target) io.to(target.socketId).emit('chat:delivered', { from: to, messageId });
+  });
+
+  socket.on('chat:read', ({ to, messageId }) => {
+    const target = onlineUsers.get(to);
+    if (target) io.to(target.socketId).emit('chat:read', { from: to, messageId });
+  });
+
+  /* WEBRTC SIGNALING */
+  socket.on('call:initiate', ({ from, fromName, fromAvatar, to, type }) => {
+    const target = onlineUsers.get(to);
+    if (!target) { socket.emit('call:unavailable', { to }); return; }
+    io.to(target.socketId).emit('call:incoming', { from, fromName, fromAvatar, type, callId: socket.id });
     console.log(`📞 Call dari ${from} ke ${to} (${type})`);
   });
 
-  socket.on('call:accept', ({ callId, to }) => {
+  socket.on('call:accept', ({ callId }) => {
     io.to(callId).emit('call:accepted');
-    console.log('Call accepted');
   });
 
   socket.on('call:reject', ({ callId }) => {
     io.to(callId).emit('call:rejected');
-    console.log('Call rejected');
   });
 
   socket.on('webrtc:offer', ({ to, offer }) => {
@@ -131,13 +138,9 @@ io.on('connection', (socket) => {
     if (target) io.to(target.socketId).emit('call:ended');
   });
 
-  /* ===== DISCONNECT ===== */
   socket.on('disconnect', () => {
     for (const [userId, data] of onlineUsers) {
-      if (data.socketId === socket.id) {
-        onlineUsers.delete(userId);
-        console.log('User offline:', userId);
-      }
+      if (data.socketId === socket.id) onlineUsers.delete(userId);
     }
     io.emit('users:online', Array.from(onlineUsers.keys()));
   });
