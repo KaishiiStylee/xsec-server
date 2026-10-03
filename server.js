@@ -1,6 +1,5 @@
 /* ============================================
-   XSEC CHAT — SERVER v3
-   Node.js + Express + Socket.IO
+   XSEC CHAT — SERVER v4
    ============================================ */
 
 const express = require('express');
@@ -10,20 +9,19 @@ const cors = require('cors');
 
 const app = express();
 app.use(cors({ origin: '*' }));
-app.use(express.json({ limit: '25mb' }));
-app.use(express.urlencoded({ limit: '25mb', extended: true }));
+app.use(express.json({ limit: '60mb' }));
+app.use(express.urlencoded({ limit: '60mb', extended: true }));
 
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: { origin: '*', methods: ['GET', 'POST'] },
-  maxHttpBufferSize: 3e7,
+  maxHttpBufferSize: 7e7,
   pingTimeout: 60000,
   pingInterval: 25000
 });
 
 let stories = [];
 
-/* Auto hapus story 24 jam */
 setInterval(() => {
   const now = Date.now();
   const before = stories.length;
@@ -31,7 +29,6 @@ setInterval(() => {
   if (stories.length !== before) io.emit('stories:update', stories);
 }, 3600 * 1000);
 
-/* Health check */
 app.get('/', (req, res) => {
   res.json({
     status: 'ok',
@@ -42,10 +39,9 @@ app.get('/', (req, res) => {
   });
 });
 
-/* ===== STORY ===== */
 app.post('/api/story', (req, res) => {
   try {
-    const { userId, userName, userAvatar, media, mediaType, caption, music, text, textBg, textFont, textColor } = req.body;
+    const { userId, userName, userAvatar, media, mediaType, caption, music, text, textBg, textFont, textColor, musicStart, musicDuration } = req.body;
     if (!userId) return res.status(400).json({ error: 'Missing userId' });
     if (mediaType === 'text' && !text) return res.status(400).json({ error: 'Missing text' });
     if (mediaType !== 'text' && !media) return res.status(400).json({ error: 'Missing media' });
@@ -55,6 +51,8 @@ app.post('/api/story', (req, res) => {
       userId, userName: userName || 'User', userAvatar: userAvatar || '',
       media: media || '', mediaType: mediaType || 'image',
       caption: caption || '', music: music || null,
+      musicStart: musicStart || 0,
+      musicDuration: musicDuration || 15,
       text: text || '', textBg: textBg || '#E53935',
       textFont: textFont || 'Plus Jakarta Sans', textColor: textColor || '#FFFFFF',
       createdAt: Date.now(), viewers: []
@@ -86,7 +84,6 @@ app.post('/api/story/:id/view', (req, res) => {
   res.json({ ok: true });
 });
 
-/* ===== USER ONLINE + LAST SEEN ===== */
 const onlineUsers = new Map();
 const lastSeenMap = new Map();
 
@@ -101,13 +98,10 @@ io.on('connection', (socket) => {
     let userId, name, avatar;
     if (typeof payload === 'string') { userId = payload; name = payload; avatar = ''; }
     else { userId = payload.userId; name = payload.name || userId; avatar = payload.avatar || ''; }
-
     onlineUsers.set(userId, { socketId: socket.id, name, avatar, lastSeen: Date.now() });
     socket.userId = userId;
-
     broadcastUsers();
     socket.emit('stories:init', stories);
-
     const lastSeenData = {};
     lastSeenMap.forEach((val, key) => { lastSeenData[key] = val; });
     socket.emit('users:lastseen', lastSeenData);
@@ -119,6 +113,7 @@ io.on('connection', (socket) => {
     socket.emit('user:lastseen', { userId, timestamp: ts });
   });
 
+  /* CHAT */
   socket.on('chat:send', (msg) => {
     const target = onlineUsers.get(msg.to);
     if (target) io.to(target.socketId).emit('chat:receive', msg);
@@ -145,46 +140,46 @@ io.on('connection', (socket) => {
     if (target) io.to(target.socketId).emit('chat:readall', { from: socket.userId });
   });
 
+  /* CALL */
   socket.on('call:initiate', ({ from, fromName, fromAvatar, to, type }) => {
     const target = onlineUsers.get(to);
-    if (!target) {
-      socket.emit('call:unavailable', { to });
-      return;
-    }
+    if (!target) { socket.emit('call:unavailable', { to }); return; }
     io.to(target.socketId).emit('call:incoming', {
       from, fromName, fromAvatar, type, callId: socket.id
     });
-    console.log(`Call ${from} -> ${to} (${type})`);
   });
 
-  socket.on('call:accept', ({ callId }) => {
-    io.to(callId).emit('call:accepted');
-  });
-
-  socket.on('call:reject', ({ callId }) => {
-    io.to(callId).emit('call:rejected');
-  });
-
+  socket.on('call:accept', ({ callId }) => { io.to(callId).emit('call:accepted'); });
+  socket.on('call:reject', ({ callId }) => { io.to(callId).emit('call:rejected'); });
   socket.on('call:cancel', ({ to }) => {
     const target = onlineUsers.get(to);
     if (target) io.to(target.socketId).emit('call:cancelled');
+  });
+  socket.on('call:upgrade-video', ({ to }) => {
+    const target = onlineUsers.get(to);
+    if (target) io.to(target.socketId).emit('call:upgrade-video');
+  });
+  socket.on('call:accept-upgrade', ({ to }) => {
+    const target = onlineUsers.get(to);
+    if (target) io.to(target.socketId).emit('call:accept-upgrade');
+  });
+  socket.on('call:reject-upgrade', ({ to }) => {
+    const target = onlineUsers.get(to);
+    if (target) io.to(target.socketId).emit('call:reject-upgrade');
   });
 
   socket.on('webrtc:offer', ({ to, offer }) => {
     const target = onlineUsers.get(to);
     if (target) io.to(target.socketId).emit('webrtc:offer', { from: socket.userId || socket.id, offer });
   });
-
   socket.on('webrtc:answer', ({ to, answer }) => {
     const target = onlineUsers.get(to);
     if (target) io.to(target.socketId).emit('webrtc:answer', { from: socket.userId || socket.id, answer });
   });
-
   socket.on('webrtc:ice', ({ to, candidate }) => {
     const target = onlineUsers.get(to);
     if (target) io.to(target.socketId).emit('webrtc:ice', { from: socket.userId || socket.id, candidate });
   });
-
   socket.on('call:end', ({ to }) => {
     const target = onlineUsers.get(to);
     if (target) io.to(target.socketId).emit('call:ended');
@@ -197,7 +192,6 @@ io.on('connection', (socket) => {
       onlineUsers.delete(socket.userId);
       broadcastUsers();
       io.emit('user:lastseen', { userId: socket.userId, timestamp: now });
-      console.log('Offline:', socket.userId);
     }
   });
 });
