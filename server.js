@@ -1,7 +1,6 @@
 /* ============================================
-   XSEC CHAT — SERVER
+   XSEC CHAT — SERVER v3
    Node.js + Express + Socket.IO
-   Deploy: Railway
    ============================================ */
 
 const express = require('express');
@@ -22,25 +21,20 @@ const io = new Server(server, {
   pingInterval: 25000
 });
 
-/* ============ STORAGE (in-memory) ============ */
 let stories = [];
 
-/* Auto-hapus story setelah 24 jam */
+/* Auto hapus story 24 jam */
 setInterval(() => {
   const now = Date.now();
   const before = stories.length;
   stories = stories.filter(s => (now - s.createdAt) < 24 * 3600 * 1000);
-  if (stories.length !== before) {
-    io.emit('stories:update', stories);
-    console.log('Story dibersihkan:', before - stories.length);
-  }
+  if (stories.length !== before) io.emit('stories:update', stories);
 }, 3600 * 1000);
 
-/* ============ HEALTH CHECK ============ */
+/* Health check */
 app.get('/', (req, res) => {
   res.json({
     status: 'ok',
-    message: 'XSEC Server is running',
     connections: io.engine.clientsCount,
     stories: stories.length,
     uptime: Math.floor(process.uptime()) + 's',
@@ -48,114 +42,83 @@ app.get('/', (req, res) => {
   });
 });
 
-/* ============================================
-   STORY ENDPOINTS
-   ============================================ */
-
-/* Upload story (foto/video/teks) */
+/* ===== STORY ===== */
 app.post('/api/story', (req, res) => {
   try {
-    const {
-      userId, userName, userAvatar,
-      media, mediaType, caption, music,
-      text, textBg, textFont, textColor
-    } = req.body;
-
-    /* Validasi */
-    if (!userId) {
-      return res.status(400).json({ error: 'Missing userId' });
-    }
-    if (mediaType === 'text' && !text) {
-      return res.status(400).json({ error: 'Missing text' });
-    }
-    if (mediaType !== 'text' && !media) {
-      return res.status(400).json({ error: 'Missing media' });
-    }
-
-    const sizeKB = media ? Math.round(media.length / 1024) : 0;
-    console.log(`Story masuk dari ${userName || userId} (${mediaType}, ${sizeKB} KB)`);
+    const { userId, userName, userAvatar, media, mediaType, caption, music, text, textBg, textFont, textColor } = req.body;
+    if (!userId) return res.status(400).json({ error: 'Missing userId' });
+    if (mediaType === 'text' && !text) return res.status(400).json({ error: 'Missing text' });
+    if (mediaType !== 'text' && !media) return res.status(400).json({ error: 'Missing media' });
 
     const story = {
       id: 'story-' + Date.now() + '-' + Math.random().toString(36).substr(2, 6),
-      userId,
-      userName: userName || 'User',
-      userAvatar: userAvatar || '',
-      media: media || '',
-      mediaType: mediaType || 'image',
-      caption: caption || '',
-      music: music || null,
-      text: text || '',
-      textBg: textBg || '#E53935',
-      textFont: textFont || 'Plus Jakarta Sans',
-      textColor: textColor || '#FFFFFF',
-      createdAt: Date.now(),
-      viewers: []
+      userId, userName: userName || 'User', userAvatar: userAvatar || '',
+      media: media || '', mediaType: mediaType || 'image',
+      caption: caption || '', music: music || null,
+      text: text || '', textBg: textBg || '#E53935',
+      textFont: textFont || 'Plus Jakarta Sans', textColor: textColor || '#FFFFFF',
+      createdAt: Date.now(), viewers: []
     };
-
     stories.push(story);
     io.emit('story:new', story);
-    console.log('Story disimpan:', story.id, '- total:', stories.length);
-
+    console.log('Story disimpan:', story.id);
     res.json(story);
   } catch (e) {
-    console.error('Error upload story:', e);
+    console.error('Error:', e);
     res.status(500).json({ error: e.message });
   }
 });
 
-/* Ambil semua story aktif */
-app.get('/api/stories', (req, res) => {
-  res.json(stories);
-});
+app.get('/api/stories', (req, res) => res.json(stories));
 
-/* Hapus story */
 app.delete('/api/story/:id', (req, res) => {
   const idx = stories.findIndex(s => s.id === req.params.id);
-  if (idx === -1) {
-    return res.status(404).json({ error: 'Not found' });
-  }
+  if (idx === -1) return res.status(404).json({ error: 'Not found' });
   const removed = stories.splice(idx, 1)[0];
   io.emit('story:deleted', removed.id);
-  console.log('Story dihapus:', removed.id);
   res.json({ ok: true });
 });
 
-/* Tandai sudah dilihat */
 app.post('/api/story/:id/view', (req, res) => {
   const { userId } = req.body;
   const s = stories.find(x => x.id === req.params.id);
-  if (s && userId && !s.viewers.includes(userId)) {
-    s.viewers.push(userId);
-    io.emit('story:viewed', { id: s.id, viewers: s.viewers });
-  }
+  if (s && userId && !s.viewers.includes(userId)) s.viewers.push(userId);
   res.json({ ok: true });
 });
 
-/* ============================================
-   SOCKET.IO — REALTIME
-   ============================================ */
-const onlineUsers = new Map(); // userId -> { socketId, name, avatar }
+/* ===== USER ONLINE + LAST SEEN ===== */
+const onlineUsers = new Map();
+const lastSeenMap = new Map();
+
+function broadcastUsers() {
+  io.emit('users:online', Array.from(onlineUsers.keys()));
+}
 
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
 
-  /* User online */
   socket.on('user:online', (payload) => {
     let userId, name, avatar;
-    if (typeof payload === 'string') {
-      userId = payload; name = payload; avatar = '';
-    } else {
-      userId = payload.userId;
-      name = payload.name || userId;
-      avatar = payload.avatar || '';
-    }
-    onlineUsers.set(userId, { socketId: socket.id, name, avatar });
-    io.emit('users:online', Array.from(onlineUsers.keys()));
+    if (typeof payload === 'string') { userId = payload; name = payload; avatar = ''; }
+    else { userId = payload.userId; name = payload.name || userId; avatar = payload.avatar || ''; }
+
+    onlineUsers.set(userId, { socketId: socket.id, name, avatar, lastSeen: Date.now() });
+    socket.userId = userId;
+
+    broadcastUsers();
     socket.emit('stories:init', stories);
-    console.log('User online:', userId);
+
+    const lastSeenData = {};
+    lastSeenMap.forEach((val, key) => { lastSeenData[key] = val; });
+    socket.emit('users:lastseen', lastSeenData);
+    console.log('Online:', userId);
   });
 
-  /* ===== CHAT ===== */
+  socket.on('user:getlastseen', (userId) => {
+    const ts = lastSeenMap.get(userId) || null;
+    socket.emit('user:lastseen', { userId, timestamp: ts });
+  });
+
   socket.on('chat:send', (msg) => {
     const target = onlineUsers.get(msg.to);
     if (target) io.to(target.socketId).emit('chat:receive', msg);
@@ -169,15 +132,19 @@ io.on('connection', (socket) => {
 
   socket.on('chat:delivered', ({ to, messageId }) => {
     const target = onlineUsers.get(to);
-    if (target) io.to(target.socketId).emit('chat:delivered', { from: to, messageId });
+    if (target) io.to(target.socketId).emit('chat:delivered', { from: socket.userId, messageId });
   });
 
   socket.on('chat:read', ({ to, messageId }) => {
     const target = onlineUsers.get(to);
-    if (target) io.to(target.socketId).emit('chat:read', { from: to, messageId });
+    if (target) io.to(target.socketId).emit('chat:read', { from: socket.userId, messageId });
   });
 
-  /* ===== CALL SIGNALING ===== */
+  socket.on('chat:readall', ({ to }) => {
+    const target = onlineUsers.get(to);
+    if (target) io.to(target.socketId).emit('chat:readall', { from: socket.userId });
+  });
+
   socket.on('call:initiate', ({ from, fromName, fromAvatar, to, type }) => {
     const target = onlineUsers.get(to);
     if (!target) {
@@ -198,20 +165,24 @@ io.on('connection', (socket) => {
     io.to(callId).emit('call:rejected');
   });
 
-  /* ===== WEBRTC ===== */
+  socket.on('call:cancel', ({ to }) => {
+    const target = onlineUsers.get(to);
+    if (target) io.to(target.socketId).emit('call:cancelled');
+  });
+
   socket.on('webrtc:offer', ({ to, offer }) => {
     const target = onlineUsers.get(to);
-    if (target) io.to(target.socketId).emit('webrtc:offer', { from: socket.id, offer });
+    if (target) io.to(target.socketId).emit('webrtc:offer', { from: socket.userId || socket.id, offer });
   });
 
   socket.on('webrtc:answer', ({ to, answer }) => {
     const target = onlineUsers.get(to);
-    if (target) io.to(target.socketId).emit('webrtc:answer', { from: socket.id, answer });
+    if (target) io.to(target.socketId).emit('webrtc:answer', { from: socket.userId || socket.id, answer });
   });
 
   socket.on('webrtc:ice', ({ to, candidate }) => {
     const target = onlineUsers.get(to);
-    if (target) io.to(target.socketId).emit('webrtc:ice', { from: socket.id, candidate });
+    if (target) io.to(target.socketId).emit('webrtc:ice', { from: socket.userId || socket.id, candidate });
   });
 
   socket.on('call:end', ({ to }) => {
@@ -219,19 +190,18 @@ io.on('connection', (socket) => {
     if (target) io.to(target.socketId).emit('call:ended');
   });
 
-  /* ===== DISCONNECT ===== */
   socket.on('disconnect', () => {
-    for (const [userId, data] of onlineUsers) {
-      if (data.socketId === socket.id) {
-        onlineUsers.delete(userId);
-        console.log('User offline:', userId);
-      }
+    if (socket.userId) {
+      const now = Date.now();
+      lastSeenMap.set(socket.userId, now);
+      onlineUsers.delete(socket.userId);
+      broadcastUsers();
+      io.emit('user:lastseen', { userId: socket.userId, timestamp: now });
+      console.log('Offline:', socket.userId);
     }
-    io.emit('users:online', Array.from(onlineUsers.keys()));
   });
 });
 
-/* ============ START ============ */
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`XSEC Server running on port ${PORT}`);
